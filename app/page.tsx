@@ -36,20 +36,20 @@ export default function Home() {
 
               {/* Subheading */}
               <p className="text-xl text-muted-foreground mb-8 max-w-2xl mx-auto text-balance">
-                Connect with exceptional designers, writers, and content creators. Explore portfolios, collaborate on projects, and participate in exclusive bounties.
+                The ultimate platform for non-technical tech talent. Find world-class creators, hire freelancers, and post bounties across 15+ disciplines.
               </p>
 
               {/* CTA Buttons */}
               <div className="flex flex-col sm:flex-row gap-4 justify-center mb-12">
                 <Link href="/creators">
                   <Button size="lg" className="group">
-                    Explore Creators
+                    Browse Creators
                     <ArrowRight size={18} className="ml-2 group-hover:translate-x-1 transition-transform" />
                   </Button>
                 </Link>
-                <Link href="/about">
+                <Link href="/bounties">
                   <Button size="lg" variant="outline">
-                    Learn More
+                    Explore Bounties
                   </Button>
                 </Link>
               </div>
@@ -75,9 +75,9 @@ export default function Home() {
               </div>
               <div className="text-center">
                 <div className="text-4xl sm:text-5xl font-bold text-primary mb-2">
-                  3
+                  15+
                 </div>
-                <p className="text-muted-foreground">Creative Disciplines</p>
+                <p className="text-muted-foreground">Non-Tech Disciplines</p>
               </div>
             </div>
           </div>
@@ -89,10 +89,10 @@ export default function Home() {
             {/* Section Header */}
             <div className="text-center mb-12">
               <h2 className="text-3xl sm:text-4xl font-bold text-foreground mb-4">
-                Featured Creators
+                Featured Creators & Freelancers
               </h2>
               <p className="text-lg text-muted-foreground max-w-2xl mx-auto">
-                Meet some of our most talented creators across UI/UX design, writing, and content creation.
+                Discover exceptional talent across design, writing, marketing, product management, and more.
               </p>
             </div>
 
