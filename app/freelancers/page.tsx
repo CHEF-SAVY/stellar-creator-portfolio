@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import { useRouter, usePathname, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { Header } from '@/components/header';
 import { Footer } from '@/components/footer';
@@ -9,10 +10,19 @@ import { Button } from '@/components/ui/button';
 import { creators, disciplines } from '@/lib/creators-data';
 import { ArrowRight, Search, Star, UserX } from 'lucide-react';
 import { EmptyState } from '@/components/empty-state';
+import { Pagination, parsePaginationParams } from '@/components/pagination';
 
 export default function FreelancersPage() {
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
   const [selectedDiscipline, setSelectedDiscipline] = useState('All');
   const [searchQuery, setSearchQuery] = useState('');
+
+  const { page, pageSize } = parsePaginationParams({
+    page: searchParams.get('page') ?? undefined,
+    pageSize: searchParams.get('pageSize') ?? undefined,
+  });
 
   const filteredCreators = creators.filter((creator) => {
     const disciplineMatch = selectedDiscipline === 'All' || creator.discipline === selectedDiscipline;
@@ -22,6 +32,15 @@ export default function FreelancersPage() {
       creator.skills.some((skill) => skill.toLowerCase().includes(searchQuery.toLowerCase()));
     return disciplineMatch && searchMatch;
   });
+
+  const totalCount = filteredCreators.length;
+  const paginatedCreators = filteredCreators.slice((page - 1) * pageSize, page * pageSize);
+
+  const resetPage = () => {
+    const params = new URLSearchParams(searchParams.toString());
+    params.set('page', '1');
+    router.push(`${pathname}?${params.toString()}`, { scroll: false });
+  };
 
   return (
     <div className="min-h-screen flex flex-col bg-background">
@@ -50,7 +69,7 @@ export default function FreelancersPage() {
                   type="text"
                   placeholder="Search by name, skills, or expertise..."
                   value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
+                  onChange={(e) => { setSearchQuery(e.target.value); resetPage(); }}
                   className="w-full pl-12 pr-4 py-3 bg-card border border-border rounded-lg text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
                 />
               </div>
@@ -68,7 +87,7 @@ export default function FreelancersPage() {
                 {disciplines.map((discipline) => (
                   <button
                     key={discipline}
-                    onClick={() => setSelectedDiscipline(discipline)}
+                    onClick={() => { setSelectedDiscipline(discipline); resetPage(); }}
                     className={`px-4 py-2 rounded-lg font-medium transition-all ${
                       selectedDiscipline === discipline
                         ? 'bg-primary text-primary-foreground'
@@ -84,15 +103,18 @@ export default function FreelancersPage() {
             {/* Results */}
             <div>
               <p className="text-sm text-muted-foreground mb-8">
-                Showing {filteredCreators.length} freelancer{filteredCreators.length !== 1 ? 's' : ''}
+                {totalCount} freelancer{totalCount !== 1 ? 's' : ''} found
               </p>
 
-              {filteredCreators.length > 0 ? (
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                  {filteredCreators.map((creator) => (
-                    <CreatorCard key={creator.id} creator={creator} />
-                  ))}
-                </div>
+              {paginatedCreators.length > 0 ? (
+                <>
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                    {paginatedCreators.map((creator) => (
+                      <CreatorCard key={creator.id} creator={creator} />
+                    ))}
+                  </div>
+                  <Pagination total={totalCount} page={page} pageSize={pageSize} />
+                </>
               ) : (
                 <div className="text-center py-16">
                   <p className="text-lg text-muted-foreground mb-4">
@@ -103,6 +125,7 @@ export default function FreelancersPage() {
                     onClick={() => {
                       setSelectedDiscipline('All');
                       setSearchQuery('');
+                      resetPage();
                     }}
                   >
                     Clear Filters
