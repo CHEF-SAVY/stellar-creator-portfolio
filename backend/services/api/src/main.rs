@@ -282,7 +282,10 @@ fn parse_u64_to_i64(value: u64, field: &str) -> Result<i64, ApiError> {
     get, path = "/health",
     responses((status = 200, description = "Service is healthy"))
 )]
-async fn health() -> HttpResponse {
+async fn health(req: HttpRequest) -> HttpResponse {
+    let request_id = get_request_id(&req).unwrap_or_else(|| "unknown".to_string());
+    tracing::info!(request_id = %request_id, "Health check requested");
+    
     HttpResponse::Ok().json(serde_json::json!({
         "status": "healthy",
         "service": "stellar-api",
@@ -669,6 +672,7 @@ async fn register_freelancer(
     )
 )]
 async fn list_freelancers(
+    req: HttpRequest,
     query: web::Query<std::collections::HashMap<String, String>>,
     pool: web::Data<PgPool>,
 ) -> Result<HttpResponse, ApiError> {
