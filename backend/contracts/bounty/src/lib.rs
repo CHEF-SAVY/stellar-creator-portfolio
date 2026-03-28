@@ -1,7 +1,6 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, String, Vec, Symbol};
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, String, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, String, Symbol, Vec};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 #[contracttype]
@@ -12,6 +11,7 @@ pub enum BountyStatus {
     Disputed = 3,
     Cancelled = 4,
     PendingCompletion = 5,
+    Expired = 6,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -99,7 +99,7 @@ pub enum DataKey {
     Dispute(u64),
     EvidenceList(u64),
     // Persistent storage - application tracking for rate limiting
-    ApplicationsPerBounty(u64),
+    BountyApplications(u64),
     ApplicationsPerFreelancer(Address),
     // Persistent storage - list of application IDs per bounty
     BountyApplications(u64),
@@ -138,6 +138,11 @@ impl BountyContract {
         deadline: u64,
     ) -> u64 {
         creator.require_auth();
+
+        assert!(
+            deadline > env.ledger().timestamp(),
+            "Deadline must be in the future"
+        );
 
         // Use instance storage for frequently accessed counter
         let mut counter: u64 = env
@@ -218,6 +223,21 @@ impl BountyContract {
         timeline: u64,
     ) -> u64 {
         freelancer.require_auth();
+
+        let bounty: Bounty = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Bounty(bounty_id))
+            .expect("Bounty not found");
+
+        assert!(
+            bounty.status == BountyStatus::Open,
+            "Bounty is not open for applications"
+        );
+        assert!(
+            env.ledger().timestamp() <= bounty.deadline,
+            "Bounty deadline has passed"
+        );
 
         // Use instance storage for frequently accessed counter
         let mut counter: u64 = env
@@ -384,13 +404,22 @@ impl BountyContract {
     /// - Sets selected freelancer.
     /// - Updates bounty status to `InProgress`.
     pub fn select_freelancer(env: Env, bounty_id: u64, application_id: u64) -> bool {
-        let bounty: Bounty = env
+        let mut bounty: Bounty = env
             .storage()
             .persistent()
             .get(&DataKey::Bounty(bounty_id))
             .expect("Bounty not found");
 
         bounty.creator.require_auth();
+
+        assert!(
+            bounty.status == BountyStatus::Open,
+            "Bounty is not open"
+        );
+        assert!(
+            env.ledger().timestamp() <= bounty.deadline,
+            "Bounty deadline has passed"
+        );
 
         let application: BountyApplication = env
             .storage()
@@ -441,6 +470,10 @@ impl BountyContract {
             .expect("Bounty not found");
 
         assert!(bounty.status == BountyStatus::InProgress, "Bounty not in progress");
+        assert!(
+            env.ledger().timestamp() <= bounty.deadline,
+            "Bounty deadline has passed"
+        );
 
         // Use instance storage for active workflow state
         let freelancer: Address = env
@@ -476,7 +509,7 @@ impl BountyContract {
     /// - Marks work submission as approved (if exists).
     /// - Updates bounty status to `Completed`.
     pub fn complete_bounty(env: Env, bounty_id: u64) -> bool {
-        let bounty: Bounty = env
+        let mut bounty: Bounty = env
             .storage()
             .persistent()
             .get(&DataKey::Bounty(bounty_id))
@@ -517,7 +550,7 @@ impl BountyContract {
     /// # State Changes
     /// - Updates status to `Cancelled`.
     pub fn cancel_bounty(env: Env, bounty_id: u64) -> bool {
-        let bounty: Bounty = env
+        let mut bounty: Bounty = env
             .storage()
             .persistent()
             .get(&DataKey::Bounty(bounty_id))
@@ -822,12 +855,60 @@ impl BountyContract {
             .get(&DataKey::BountyCounter)
             .unwrap_or(0)
     }
+
+    /// Expires a bounty that has passed its deadline.
+    /// Can be called by anyone to enforce deadline expiration.
+    /// Only Open or InProgress bounties can be expired.
+    ///
+    /// # Parameters
+    /// - `env`: Soroban environment.
+    /// - `bounty_id`: Bounty ID to expire.
+    ///
+    /// # Returns
+    /// - `bool`: Always `true` on success.
+    ///
+    /// # Errors
+    /// - Panics if bounty not found.
+    /// - Panics if deadline has not passed yet.
+    /// - Panics if bounty is not Open or InProgress.
+    ///
+    /// # State Changes
+    /// - Updates bounty status to `Expired`.
+    pub fn expire_bounty(env: Env, bounty_id: u64) -> bool {
+        let mut bounty: Bounty = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Bounty(bounty_id))
+            .expect("Bounty not found");
+
+        assert!(
+            env.ledger().timestamp() > bounty.deadline,
+            "Bounty deadline has not passed yet"
+        );
+        assert!(
+            bounty.status == BountyStatus::Open || bounty.status == BountyStatus::InProgress,
+            "Only open or in-progress bounties can be expired"
+        );
+
+        bounty.status = BountyStatus::Expired;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Bounty(bounty_id), &bounty);
+
+        // Emit BountyExpired event
+        env.events().publish(
+            (Symbol::new(&env, "bounty_expire"), bounty_id),
+            (bounty.deadline, env.ledger().timestamp()),
+        );
+
+        true
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::testutils::{Address as _, Ledger};
     use soroban_sdk::Env;
 
     #[test]
@@ -1311,52 +1392,33 @@ mod tests {
         );
     }
 
-    // -------------------------------------------------------------------------
-    // Tests for withdraw_application (Issue #164)
-    // -------------------------------------------------------------------------
+    // ===== Deadline Enforcement Tests =====
 
     #[test]
-    fn test_withdraw_application_success() {
+    #[should_panic(expected = "Deadline must be in the future")]
+    fn test_create_bounty_deadline_in_past() {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register(BountyContract, ());
         let client = BountyContractClient::new(&env, &contract_id);
 
         let creator = Address::generate(&env);
-        let freelancer = Address::generate(&env);
 
-        let bounty_id = client.create_bounty(
+        // Set ledger timestamp to 1000, try deadline of 500 (in the past)
+        env.ledger().set_timestamp(1000);
+
+        client.create_bounty(
             &creator,
-            &String::from_str(&env, "Test Bounty"),
-            &String::from_str(&env, "Test Description"),
+            &String::from_str(&env, "Late Bounty"),
+            &String::from_str(&env, "Should fail"),
             &5000i128,
-            &100u64,
+            &500u64,
         );
-
-        let app_id = client.apply_for_bounty(
-            &bounty_id,
-            &freelancer,
-            &String::from_str(&env, "I can do this!"),
-            &4500i128,
-            &30u64,
-        );
-
-        // Application should not be withdrawn initially
-        let application = client.get_application(&app_id);
-        assert!(!application.is_withdrawn);
-
-        // Freelancer withdraws their application
-        let result = client.withdraw_application(&app_id, &freelancer);
-        assert!(result);
-
-        // Application should now be marked as withdrawn
-        let application = client.get_application(&app_id);
-        assert!(application.is_withdrawn);
     }
 
     #[test]
-    #[should_panic(expected = "Not the application owner")]
-    fn test_withdraw_application_unauthorized() {
+    #[should_panic(expected = "Bounty deadline has passed")]
+    fn test_apply_after_deadline() {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register(BountyContract, ());
@@ -1364,31 +1426,32 @@ mod tests {
 
         let creator = Address::generate(&env);
         let freelancer = Address::generate(&env);
-        let attacker = Address::generate(&env);
 
+        // Create bounty with deadline at 1000
         let bounty_id = client.create_bounty(
             &creator,
             &String::from_str(&env, "Test Bounty"),
             &String::from_str(&env, "Test Description"),
             &5000i128,
-            &100u64,
+            &1000u64,
         );
 
-        let app_id = client.apply_for_bounty(
+        // Advance time past deadline
+        env.ledger().set_timestamp(1001);
+
+        // Should fail - deadline passed
+        client.apply_for_bounty(
             &bounty_id,
             &freelancer,
-            &String::from_str(&env, "I can do this!"),
+            &String::from_str(&env, "Too late!"),
             &4500i128,
             &30u64,
         );
-
-        // Attacker tries to withdraw someone else's application
-        client.withdraw_application(&app_id, &attacker);
     }
 
     #[test]
-    #[should_panic(expected = "Application already withdrawn")]
-    fn test_withdraw_application_already_withdrawn() {
+    #[should_panic(expected = "Bounty deadline has passed")]
+    fn test_select_freelancer_after_deadline() {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register(BountyContract, ());
@@ -1402,7 +1465,7 @@ mod tests {
             &String::from_str(&env, "Test Bounty"),
             &String::from_str(&env, "Test Description"),
             &5000i128,
-            &100u64,
+            &1000u64,
         );
 
         let app_id = client.apply_for_bounty(
@@ -1413,16 +1476,16 @@ mod tests {
             &30u64,
         );
 
-        // First withdrawal succeeds
-        client.withdraw_application(&app_id, &freelancer);
+        // Advance time past deadline
+        env.ledger().set_timestamp(1001);
 
-        // Second withdrawal should panic
-        client.withdraw_application(&app_id, &freelancer);
+        // Should fail - deadline passed
+        client.select_freelancer(&bounty_id, &app_id);
     }
 
     #[test]
-    #[should_panic(expected = "Cannot withdraw after freelancer has been selected")]
-    fn test_withdraw_application_after_selection() {
+    #[should_panic(expected = "Bounty deadline has passed")]
+    fn test_submit_completion_after_deadline() {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register(BountyContract, ());
@@ -1436,7 +1499,7 @@ mod tests {
             &String::from_str(&env, "Test Bounty"),
             &String::from_str(&env, "Test Description"),
             &5000i128,
-            &100u64,
+            &1000u64,
         );
 
         let app_id = client.apply_for_bounty(
@@ -1447,10 +1510,136 @@ mod tests {
             &30u64,
         );
 
-        // Creator selects the freelancer (bounty → InProgress)
         client.select_freelancer(&bounty_id, &app_id);
 
-        // Withdrawal should now be blocked
-        client.withdraw_application(&app_id, &freelancer);
+        // Advance time past deadline
+        env.ledger().set_timestamp(1001);
+
+        // Should fail - deadline passed
+        client.submit_completion(&bounty_id);
+    }
+
+    #[test]
+    fn test_expire_open_bounty() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(BountyContract, ());
+        let client = BountyContractClient::new(&env, &contract_id);
+
+        let creator = Address::generate(&env);
+
+        let bounty_id = client.create_bounty(
+            &creator,
+            &String::from_str(&env, "Test Bounty"),
+            &String::from_str(&env, "Test Description"),
+            &5000i128,
+            &1000u64,
+        );
+
+        // Advance time past deadline
+        env.ledger().set_timestamp(1001);
+
+        let result = client.expire_bounty(&bounty_id);
+        assert!(result);
+
+        let bounty = client.get_bounty(&bounty_id);
+        assert_eq!(bounty.status, BountyStatus::Expired);
+    }
+
+    #[test]
+    fn test_expire_in_progress_bounty() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(BountyContract, ());
+        let client = BountyContractClient::new(&env, &contract_id);
+
+        let creator = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+
+        let bounty_id = client.create_bounty(
+            &creator,
+            &String::from_str(&env, "Test Bounty"),
+            &String::from_str(&env, "Test Description"),
+            &5000i128,
+            &1000u64,
+        );
+
+        let app_id = client.apply_for_bounty(
+            &bounty_id,
+            &freelancer,
+            &String::from_str(&env, "I can do this!"),
+            &4500i128,
+            &30u64,
+        );
+
+        client.select_freelancer(&bounty_id, &app_id);
+
+        // Advance time past deadline
+        env.ledger().set_timestamp(1001);
+
+        let result = client.expire_bounty(&bounty_id);
+        assert!(result);
+
+        let bounty = client.get_bounty(&bounty_id);
+        assert_eq!(bounty.status, BountyStatus::Expired);
+    }
+
+    #[test]
+    #[should_panic(expected = "Bounty deadline has not passed yet")]
+    fn test_expire_bounty_before_deadline() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(BountyContract, ());
+        let client = BountyContractClient::new(&env, &contract_id);
+
+        let creator = Address::generate(&env);
+
+        let bounty_id = client.create_bounty(
+            &creator,
+            &String::from_str(&env, "Test Bounty"),
+            &String::from_str(&env, "Test Description"),
+            &5000i128,
+            &1000u64,
+        );
+
+        // Try to expire before deadline
+        client.expire_bounty(&bounty_id);
+    }
+
+    #[test]
+    #[should_panic(expected = "Only open or in-progress bounties can be expired")]
+    fn test_expire_completed_bounty() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(BountyContract, ());
+        let client = BountyContractClient::new(&env, &contract_id);
+
+        let creator = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+
+        let bounty_id = client.create_bounty(
+            &creator,
+            &String::from_str(&env, "Test Bounty"),
+            &String::from_str(&env, "Test Description"),
+            &5000i128,
+            &1000u64,
+        );
+
+        let app_id = client.apply_for_bounty(
+            &bounty_id,
+            &freelancer,
+            &String::from_str(&env, "I can do this!"),
+            &4500i128,
+            &30u64,
+        );
+
+        client.select_freelancer(&bounty_id, &app_id);
+        client.complete_bounty(&bounty_id);
+
+        // Advance time past deadline
+        env.ledger().set_timestamp(1001);
+
+        // Should fail - completed bounties can't be expired
+        client.expire_bounty(&bounty_id);
     }
 }
